@@ -11,20 +11,11 @@ mcp = FastMCP("local-coding-ai-agent")
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", os.getcwd())).expanduser().resolve()
 ALLOW_WRITES = os.environ.get("ALLOW_WRITES", "false").lower() in {"1", "true", "yes"}
+ALLOW_EXEC = os.environ.get("ALLOW_EXEC", "false").lower() in {"1", "true", "yes"}
 
 ALLOWED_COMMANDS = {
-    "python3",
-    "python",
-    "mvn",
-    "./mvnw",
-    "gradle",
-    "./gradlew",
-    "git",
-    "find",
-    "grep",
-    "rg",
-    "ls",
-    "pwd",
+    "python3", "python", "mvn", "./mvnw", "gradle", "./gradlew",
+    "git", "find", "grep", "rg", "ls", "pwd",
 }
 
 
@@ -53,9 +44,12 @@ def parse_command(command: str) -> list[str]:
 
 def require_writes_enabled() -> None:
     if not ALLOW_WRITES:
-        raise PermissionError(
-            "write operations are disabled. Set ALLOW_WRITES=true for this MCP server process."
-        )
+        raise PermissionError("write operations are disabled")
+
+
+def require_exec_enabled() -> None:
+    if not ALLOW_EXEC:
+        raise PermissionError("command execution is disabled")
 
 
 @mcp.tool()
@@ -126,6 +120,7 @@ def apply_patch(path: str, old_text: str, new_text: str) -> str:
 @mcp.tool()
 def run_command(command: str, timeout_seconds: int = 120) -> dict:
     """Run an allowlisted executable with PROJECT_ROOT as the working directory."""
+    require_exec_enabled()
     args = parse_command(command)
     completed = subprocess.run(
         args,
@@ -136,36 +131,20 @@ def run_command(command: str, timeout_seconds: int = 120) -> dict:
         timeout=max(1, min(timeout_seconds, 600)),
         check=False,
     )
-    return {
-        "returncode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-    }
+    return {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
 
 
 @mcp.tool()
 def git_status() -> str:
     """Return git status for the project."""
-    result = subprocess.run(
-        ["git", "status", "--short", "--branch"],
-        cwd=PROJECT_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    result = subprocess.run(["git", "status", "--short", "--branch"], cwd=PROJECT_ROOT, text=True, capture_output=True, check=False)
     return result.stdout + result.stderr
 
 
 @mcp.tool()
 def git_diff() -> str:
     """Return the working-tree diff for the project."""
-    result = subprocess.run(
-        ["git", "diff", "--"],
-        cwd=PROJECT_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    result = subprocess.run(["git", "diff", "--"], cwd=PROJECT_ROOT, text=True, capture_output=True, check=False)
     return result.stdout + result.stderr
 
 
