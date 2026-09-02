@@ -1,48 +1,37 @@
-const ACTION_START = '[[LOCAL_CODING_AGENT_ACTION]]';
-const ACTION_END = '[[/LOCAL_CODING_AGENT_ACTION]]';
-const TOOL_CONTRACT = `Available local read-only tools and arguments:
-- list_files({path?: string})
-- read_file({path: string})
-- search_files({query: string})
-- git_status({})
-- git_diff({})
-The extension executes these locally through a localhost relay. You do NOT have native MCP access in ChatGPT.
-Write/patch/command execution tools are intentionally disabled in secure mode.`;
-const BOOTSTRAP = `You are now operating in LOCAL CODING AI AGENT MODE.
-You are the reasoning/controller layer for a local coding agent.
-IMPORTANT: ChatGPT does NOT have a native Local Coding AI Agent MCP tool. Do not claim that a local tool is unavailable, and do not use GitHub/web/browsing/connected apps for local-project tasks.
-Instead, communicate with the local executor using the text protocol below.
-Whenever a request requires local project state, you MUST emit exactly one JSON action envelope between these markers and wait for the returned tool result before continuing:
-${ACTION_START}
+const COMMAND_START = '[[LOCAL_AGENT_COMMAND]]';
+const COMMAND_END = '[[/LOCAL_AGENT_COMMAND]]';
+const RESULT_PREFIX = 'LOCAL_AGENT_RESULT';
+
+const BOOTSTRAP = `You are the reasoning engine for a LOCAL CODING AGENT. This is a text protocol, not a native ChatGPT tool.
+
+For any request that needs the user's local project, ALWAYS request data through LOCAL_AGENT_COMMAND. Never use GitHub, web, browsing, connected apps, remote repositories, or conversation files for local-project inspection. Do not answer from assumptions or prior project knowledge. Never say that a local tool is unavailable.
+
+Emit exactly one command at a time and wait for LOCAL_AGENT_RESULT before continuing:
+${COMMAND_START}
 {"type":"action","request_id":"unique-id","tool":"tool_name","arguments":{}}
-${ACTION_END}
-Supported local tools:
-${TOOL_CONTRACT}
-After the extension returns a tool result, continue from that local result. If more local information is required, emit exactly one more action envelope. Do not emit more than one action at a time.
-When the task is complete, output:
-${ACTION_START}
-{"type":"done","summary":"..."}
-${ACTION_END}
-Never invent a tool. Never request absolute paths. Prefer the smallest safe read. Treat tool results as authoritative local state. For a request like “list the files”, immediately emit list_files instead of explaining that a tool is unavailable.`;
-const RECOVERY_PROMPT = `LOCAL CODING AGENT PROTOCOL RECOVERY.
-You previously responded that a local MCP/tool was unavailable. Do not repeat that explanation.
-You are not being asked to invoke a native ChatGPT tool. You are being asked to emit the LOCAL CODING AGENT text protocol so the browser extension can execute the action locally.
-For the pending local-project request, emit exactly one action envelope now.
-Use only these tools:
+${COMMAND_END}
+
+Supported commands:
 - list_files({path?: string})
 - read_file({path: string})
 - search_files({query: string})
 - git_status({})
 - git_diff({})
-Do not use GitHub, web, browsing, connected apps, or remote repository data.`;
+
+Use relative paths only. Treat LOCAL_AGENT_RESULT as authoritative local state. For a file-list request, immediately emit list_files instead of explaining tool availability.
+
+When complete:
+${COMMAND_START}
+{"type":"done","summary":"..."}
+${COMMAND_END}`;
+
+const RECOVERY = `LOCAL AGENT PROTOCOL RECOVERY. Do not discuss tool availability. Do not use GitHub, web, browsing, connected apps, or remote repositories. Emit exactly one LOCAL_AGENT_COMMAND for the pending local-project request, then wait for LOCAL_AGENT_RESULT.`;
 
 let enabled = false;
 const seen = new WeakSet();
 const recoverySent = new WeakSet();
 
-function getComposer() {
-  return document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
-}
+function getComposer() { return document.querySelector('textarea') || document.querySelector('[contenteditable="true"]'); }
 
 function setComposerText(text) {
   const el = getComposer();
@@ -79,88 +68,49 @@ function executeAction(envelope) {
   });
 }
 
-function extractEnvelope(text) {
-  const start = text.indexOf(ACTION_START);
+function extractCommand(text) {
+  const start = text.indexOf(COMMAND_START);
   if (start < 0) return null;
-  const end = text.indexOf(ACTION_END, start + ACTION_START.length);
+  const end = text.indexOf(COMMAND_END, start + COMMAND_START.length);
   if (end < 0) return null;
-  const candidate = text.slice(start + ACTION_START.length, end).trim();
   try {
-    const value = JSON.parse(candidate);
+    const value = JSON.parse(text.slice(start + COMMAND_START.length, end).trim());
     if (!value || typeof value !== 'object') return null;
-    if (value.type !== 'action' && value.type !== 'done') return null;
-    return value;
+    return value.type === 'action' || value.type === 'done' ? value : null;
   } catch { return null; }
 }
 
-function looksLikeToolUnavailable(text) {
-  const normalized = text.toLowerCase();
-  return (normalized.includes('local mcp') || normalized.includes('local coding ai agent')) && (
-    normalized.includes('not available') ||
-    normalized.includes('unavailable') ||
-    normalized.includes('not exposed') ||
-    normalized.includes('currently exposed') ||
-    normalized.includes('tools currently exposed')
-  );
+function looksLikeFailure(text) {
+  const t = text.toLowerCase();
+  return t.includes('local mcp') || t.includes('local coding ai agent') && (t.includes('not available') || t.includes('not exposed') || t.includes('cannot access'));
 }
 
-function assistantArticles() {
-  const direct = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-  if (direct.length) return direct;
-  return [...document.querySelectorAll('article')].filter((article) => {
-    const text = article.textContent || '';
-    return text.includes(ACTION_START) || looksLikeToolUnavailable(text);
-  });
-}
+function assistantArticles() { return [...document.querySelectorAll('[data-message-author-role="assistant"]')].length ? [...document.querySelectorAll('[data-message-author-role="assistant"]')] : [...document.querySelectorAll('article')]; }
 
 function sendRecovery(article) {
   if (recoverySent.has(article)) return;
   recoverySent.add(article);
   seen.add(article);
-  setTimeout(() => {
-    try {
-      setComposerText(RECOVERY_PROMPT);
-      submitComposer();
-    } catch (error) {
-      console.error('Local Coding AI Agent recovery failed:', error);
-    }
-  }, 250);
+  setTimeout(() => { try { setComposerText(RECOVERY); submitComposer(); } catch (e) { console.error('Local agent recovery failed:', e); } }, 250);
 }
 
 async function processAssistantArticle(article) {
   if (seen.has(article)) return;
   const text = article.textContent || '';
-  const envelope = extractEnvelope(text);
-  if (!envelope) {
-    if (looksLikeToolUnavailable(text)) sendRecovery(article);
-    return;
-  }
+  const command = extractCommand(text);
+  if (!command) { if (looksLikeFailure(text)) sendRecovery(article); return; }
   seen.add(article);
-  if (envelope.type === 'done') return;
-
-  const result = await executeAction(envelope);
-  const responseText = result?.ok
-    ? `LOCAL CODING AGENT TOOL RESULT\n${JSON.stringify(result)}`
-    : `LOCAL CODING AGENT TOOL ERROR\n${JSON.stringify(result || { ok: false, error: 'unknown error' })}`;
+  if (command.type === 'done') return;
+  const result = await executeAction(command);
+  const responseText = result?.ok ? `${RESULT_PREFIX}\n${JSON.stringify(result)}` : `LOCAL_AGENT_ERROR\n${JSON.stringify(result || { ok: false, error: 'unknown error' })}`;
   setComposerText(responseText);
   submitComposer();
 }
 
-function scan() {
-  if (!enabled) return;
-  for (const article of assistantArticles()) void processAssistantArticle(article);
-}
-
-const observer = new MutationObserver(scan);
-observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true });
-setInterval(scan, 1500);
+function scan() { if (!enabled) return; for (const article of assistantArticles()) void processAssistantArticle(article); }
+new MutationObserver(scan).observe(document.documentElement, { subtree: true, childList: true, characterData: true });
+setInterval(scan, 1000);
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'bootstrap-agent-mode') {
-    enabled = true;
-    setComposerText(BOOTSTRAP);
-    submitComposer();
-    sendResponse({ ok: true });
-    return true;
-  }
+  if (message?.type === 'bootstrap-agent-mode') { enabled = true; setComposerText(BOOTSTRAP); submitComposer(); sendResponse({ ok: true }); return true; }
 });
