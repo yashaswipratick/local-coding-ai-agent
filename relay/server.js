@@ -10,9 +10,6 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.RELAY_PORT || 8787);
 const PROJECT_ROOT = path.resolve(process.env.PROJECT_ROOT || process.cwd());
 const PYTHON_BIN = process.env.MCP_PYTHON || path.join(PROJECT_ROOT, 'mcp-server', '.venv', 'bin', 'python');
-
-// OAuth credentials are intentionally read only from this exact local file on the user's Mac.
-// Never copy this file into the repository, browser extension, or Git.
 const GOOGLE_CREDENTIALS_FILE = '/Users/yashaswipratick/Documents/youtube-analytics/screts.json';
 const EXTENSION_ORIGIN = (process.env.EXTENSION_ORIGIN || '').trim();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -33,27 +30,19 @@ function loadGoogleCredentials() {
   if (!fs.existsSync(GOOGLE_CREDENTIALS_FILE)) {
     throw new Error(`Google OAuth credentials file not found: ${GOOGLE_CREDENTIALS_FILE}`);
   }
-
   let parsed;
   try {
     parsed = JSON.parse(fs.readFileSync(GOOGLE_CREDENTIALS_FILE, 'utf8'));
   } catch (err) {
     throw new Error(`Could not parse Google OAuth credentials file: ${String(err.message || err)}`);
   }
-
   const clientId = parsed?.['client-id'];
   const clientSecret = parsed?.['client-secret'];
   const allowedEmail = String(parsed?.ALLOWED_GOOGLE_EMAIL || '').trim().toLowerCase();
-
   if (!clientId) throw new Error(`Missing "client-id" in ${GOOGLE_CREDENTIALS_FILE}`);
   if (!clientSecret) throw new Error(`Missing "client-secret" in ${GOOGLE_CREDENTIALS_FILE}`);
   if (!allowedEmail) throw new Error(`Missing "ALLOWED_GOOGLE_EMAIL" in ${GOOGLE_CREDENTIALS_FILE}`);
-
-  googleCredentials = {
-    clientId: String(clientId),
-    clientSecret: String(clientSecret),
-    allowedEmail,
-  };
+  googleCredentials = { clientId: String(clientId), clientSecret: String(clientSecret), allowedEmail };
   return googleCredentials;
 }
 
@@ -83,6 +72,11 @@ function sendJson(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': EXTENSION_ORIGIN || '*', 'Access-Control-Allow-Headers': 'content-type, authorization', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Vary': 'Origin' });
   res.end(body);
 }
+function sendHtml(res, status, html) {
+  const body = `<!doctype html><html><head><meta charset="utf-8"><title>Local Coding AI Agent</title></head><body style="font-family:system-ui;padding:32px"><h2>${html}</h2><p>You can close this tab and return to the extension.</p></body></html>`;
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' });
+  res.end(body);
+}
 function redirect(res, location) { res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' }); res.end(); }
 async function readBody(req) {
   const chunks = []; let size = 0;
@@ -94,7 +88,7 @@ async function getMcpClient() {
   if (connecting) return connecting;
   connecting = (async () => {
     mcpTransport = new StdioClientTransport({ command: PYTHON_BIN, args: [path.join(PROJECT_ROOT, 'mcp-server', 'server.py')], cwd: PROJECT_ROOT, env: { ...process.env, PROJECT_ROOT } });
-    const client = new Client({ name: 'local-coding-ai-agent-relay', version: '0.2.2' });
+    const client = new Client({ name: 'local-coding-ai-agent-relay', version: '0.2.3' });
     await client.connect(mcpTransport); mcpClient = client; return client;
   })();
   try { return await connecting; } finally { connecting = undefined; }
@@ -131,9 +125,9 @@ function authStart(res) {
 async function oauthCallback(req, res, url) {
   const state = url.searchParams.get('state') || ''; const code = url.searchParams.get('code') || ''; const error = url.searchParams.get('error') || '';
   const pending = pendingAuth.get(state);
-  if (!pending || Date.now() - pending.createdAt > AUTH_TTL_MS) { pendingAuth.delete(state); return sendJson(res, 400, { ok: false, error: 'invalid or expired OAuth state' }); }
-  if (error) { pendingAuth.delete(state); pendingAuth.set(state, { completedAt: Date.now(), error: `Google OAuth failed: ${error}` }); return redirect(res, `http://${HOST}:${PORT}/oauth/result?state=${encodeURIComponent(state)}`); }
-  if (!code) return sendJson(res, 400, { ok: false, error: 'missing OAuth code' });
+  if (!pending || Date.now() - pending.createdAt > AUTH_TTL_MS) { pendingAuth.delete(state); return sendHtml(res, 400, 'Sign-in failed: invalid or expired OAuth state.'); }
+  if (error) { pendingAuth.delete(state); return sendHtml(res, 400, `Sign-in failed: Google returned ${error}.`); }
+  if (!code) return sendHtml(res, 400, 'Sign-in failed: missing OAuth authorization code.');
   try {
     const credentials = loadGoogleCredentials();
     const redirectUri = `http://${HOST}:${PORT}/oauth/callback`;
@@ -149,11 +143,11 @@ async function oauthCallback(req, res, url) {
     sessions.set(sessionToken, { email, issuedAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS, capabilities: ['read'] });
     pendingAuth.delete(state); pendingAuth.set(state, { completedAt: Date.now(), sessionToken, email });
     audit({ user: email, event: 'oauth_login', status: 'ok' });
-    return redirect(res, `http://${HOST}:${PORT}/oauth/result?state=${encodeURIComponent(state)}`);
+    return sendHtml(res, 200, 'Google sign-in successful ✅');
   } catch (err) {
     pendingAuth.delete(state); pendingAuth.set(state, { completedAt: Date.now(), error: String(err.message || err) });
     audit({ event: 'oauth_login', status: 'error' });
-    return redirect(res, `http://${HOST}:${PORT}/oauth/result?state=${encodeURIComponent(state)}`);
+    return sendHtml(res, 400, `Sign-in failed: ${String(err.message || err)}`);
   }
 }
 function authStatus(res, url) {
@@ -177,6 +171,7 @@ async function main() {
       if (req.method === 'GET' && url.pathname === '/auth/start') return authStart(res);
       if (req.method === 'GET' && url.pathname === '/oauth/callback') return await oauthCallback(req, res, url);
       if (req.method === 'GET' && url.pathname === '/auth/status') return authStatus(res, url);
+      if (req.method === 'GET' && url.pathname === '/oauth/result') return sendHtml(res, 200, 'OAuth callback processed.');
       if (req.method === 'POST' && url.pathname === '/logout') return logout(req, res);
       if (req.method === 'POST' && url.pathname === '/action') return await handleAction(req, res);
       return sendJson(res, 404, { ok: false, error: 'not found' });
