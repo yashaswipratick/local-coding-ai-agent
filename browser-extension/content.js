@@ -1,25 +1,27 @@
-const COMMAND_START = '[[LOCAL_AGENT_COMMAND]]';
-const COMMAND_END = '[[/LOCAL_AGENT_COMMAND]]';
 const RESULT_PREFIX = 'LOCAL_AGENT_RESULT';
-
-const BOOTSTRAP = `You are the reasoning engine for a local coding agent. You do not have filesystem access yourself. Do not use GitHub, web, browsing, connected apps, remote repositories, or conversation files for local-project inspection.
-
-For local-project tasks, cooperate with an external local controller. When the controller protocol is needed, output exactly one JSON command between these markers:
-${COMMAND_START}
-{"type":"action","request_id":"unique-id","tool":"tool_name","arguments":{}}
-${COMMAND_END}
-
-Supported tools: list_files({path?: string}), read_file({path: string}), search_files({query: string}), git_status({}), git_diff({}). Use relative paths only. Do not claim that you inspected the local filesystem. Wait for LOCAL_AGENT_RESULT before making claims about local state.
-
-When complete, emit a done envelope using the same markers.`;
+const BOOTSTRAP = `LOCAL CODING AGENT MODE IS ON.
+The browser extension is the local controller. ChatGPT is the reasoning layer.
+For local-project questions, rely on LOCAL_AGENT_RESULT supplied by the controller. Do not use GitHub, web search, browsing, connected apps, remote repositories, or conversation files to infer local state. Do not claim to have inspected the local machine unless the controller result says so.
+You may explain, reason, plan, and write code based on the supplied local result.`;
 
 let enabled = false;
-const seen = new WeakSet();
-const routedRefusal = new WeakSet();
+let controllerBusy = false;
+let agentSubmitting = false;
+let lastHandledText = '';
 
-function composer() { return document.querySelector('textarea') || document.querySelector('[contenteditable="true"]'); }
+function composer() {
+  return document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
+}
+
+function composerText() {
+  const el = composer();
+  return el?.value ?? el?.textContent ?? '';
+}
+
 function setText(text) {
-  const el = composer(); if (!el) throw new Error('ChatGPT composer not found'); el.focus();
+  const el = composer();
+  if (!el) throw new Error('ChatGPT composer not found');
+  el.focus();
   if (el.tagName === 'TEXTAREA') {
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
     setter?.call(el, text);
@@ -28,88 +30,134 @@ function setText(text) {
   }
   el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
 }
+
 function submit() {
-  const btn = [...document.querySelectorAll('button')].find(b => {
-    const s = `${b.getAttribute('aria-label') || ''} ${b.textContent || ''}`.toLowerCase();
-    return (s.includes('send') || s.includes('submit')) && !b.disabled;
+  const button = [...document.querySelectorAll('button')].find((b) => {
+    const label = `${b.getAttribute('aria-label') || ''} ${b.textContent || ''}`.toLowerCase();
+    return (label.includes('send') || label.includes('submit')) && !b.disabled;
   });
-  if (btn) { btn.click(); return; }
-  composer()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-}
-function extract(text) {
-  const s = text.indexOf(COMMAND_START); if (s < 0) return null;
-  const e = text.indexOf(COMMAND_END, s + COMMAND_START.length); if (e < 0) return null;
-  try {
-    const v = JSON.parse(text.slice(s + COMMAND_START.length, e).trim());
-    return v && (v.type === 'action' || v.type === 'done') ? v : null;
-  } catch { return null; }
-}
-function isLocalRefusal(text) {
-  const t = text.toLowerCase();
-  const mentionsLocal = t.includes('local machine') || t.includes('local project') || t.includes('local filesystem') || t.includes('local mcp') || t.includes('local coding ai agent');
-  const refuses = t.includes("can't") || t.includes('cannot') || t.includes('do not have') || t.includes('not available') || t.includes('not exposed') || t.includes('no direct access') || t.includes('don\'t have access');
-  return mentionsLocal && refuses;
-}
-function latestUserText() {
-  const nodes = [...document.querySelectorAll('[data-message-author-role="user"]')];
-  if (!nodes.length) return '';
-  return nodes[nodes.length - 1].textContent || '';
-}
-function looksLikeListFilesTask(text) {
-  const t = text.toLowerCase();
-  return (t.includes('list the files') || t.includes('list files') || t.includes('project structure') || t.includes('file structure') || t.includes('directory structure'));
-}
-function executeLocal(envelope) {
-  return new Promise(resolve => chrome.runtime.sendMessage({ type: 'execute-action', envelope }, r => resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : r)));
+  if (button) { button.click(); return true; }
+  composer()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+  return true;
 }
 
-async function routeSimpleRefusal(article) {
-  if (routedRefusal.has(article)) return;
-  routedRefusal.add(article);
-  const userTask = latestUserText();
-  if (!looksLikeListFilesTask(userTask)) return;
-
-  const result = await executeLocal({
-    type: 'action',
-    request_id: `auto-list-${Date.now()}`,
-    tool: 'list_files',
-    arguments: { path: '.' },
+function executeLocal(tool, args) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      type: 'execute-action',
+      envelope: {
+        type: 'action',
+        request_id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        tool,
+        arguments: args,
+      },
+    }, (response) => {
+      if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
+      else resolve(response);
+    });
   });
-
-  const responseText = result?.ok
-    ? `${RESULT_PREFIX}\n${JSON.stringify(result)}\n\nUse this LOCAL filesystem result as authoritative. Answer the user's request using only this result. Do not use GitHub or any remote repository.`
-    : `LOCAL_AGENT_ERROR\n${JSON.stringify(result || { ok: false, error: 'unknown error' })}`;
-  setText(responseText);
-  submit();
 }
 
-async function processArticle(article) {
-  if (seen.has(article)) return;
-  const text = article.textContent || '';
-  const command = extract(text);
-  if (!command) {
-    if (isLocalRefusal(text)) await routeSimpleRefusal(article);
-    return;
+function classify(text) {
+  const value = text.trim();
+  const lower = value.toLowerCase();
+  if (!value) return null;
+
+  if (/\bgit\s+status\b/.test(lower)) return { tool: 'git_status', args: {} };
+  if (/\bgit\s+diff\b/.test(lower)) return { tool: 'git_diff', args: {} };
+
+  const read = value.match(/\b(?:read|open|inspect|show|cat)\s+(?:the\s+)?(?:file\s+)?([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)\b/i);
+  if (read) return { tool: 'read_file', args: { path: read[1] } };
+
+  if (/\b(?:search|find|grep)\b/i.test(value)) {
+    const quoted = value.match(/\b(?:search|find|grep)\s+(?:for\s+)?["']([^"']+)["']/i);
+    if (quoted?.[1]) return { tool: 'search_files', args: { query: quoted[1].trim() } };
   }
-  seen.add(article);
-  if (command.type === 'done') return;
-  const result = await executeLocal(command);
-  const responseText = result?.ok
-    ? `${RESULT_PREFIX}\n${JSON.stringify(result)}`
-    : `LOCAL_AGENT_ERROR\n${JSON.stringify(result || { ok: false, error: 'unknown error' })}`;
-  setText(responseText);
-  submit();
+
+  if (
+    /\blist\s+(?:all\s+)?(?:the\s+)?(?:files|folders|directories)\b/.test(lower) ||
+    /\b(?:project|folder|directory|file)\s+structure\b/.test(lower) ||
+    /\b(?:directory|folder)\s+tree\b/.test(lower) ||
+    /\bwhat\s+files\b/.test(lower)
+  ) return { tool: 'list_files', args: {} };
+
+  // For a broader local coding request, first obtain the local project tree.
+  if (/\b(?:local\s+project|local\s+code|local\s+repository|project)\b/.test(lower) &&
+      /\b(?:fix|debug|implement|change|update|understand|explain|inspect|analy[sz]e)\b/.test(lower)) {
+    return { tool: 'list_files', args: {} };
+  }
+
+  return null;
 }
-function scan() {
-  if (!enabled) return;
-  const direct = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-  const articles = direct.length ? direct : [...document.querySelectorAll('article')];
-  for (const article of articles) void processArticle(article);
+
+async function controllerFirst(userText) {
+  const intent = classify(userText);
+  if (!intent || controllerBusy) return false;
+  controllerBusy = true;
+  try {
+    const result = await executeLocal(intent.tool, intent.args);
+    const payload = result?.ok
+      ? { ok: true, tool: intent.tool, result: result.result }
+      : { ok: false, tool: intent.tool, error: result?.error || 'unknown local controller error' };
+
+    const prompt = `${BOOTSTRAP}\n\nORIGINAL USER REQUEST:\n${userText}\n\n${RESULT_PREFIX}:\n${JSON.stringify(payload)}\n\nAnswer the original user request using the authoritative LOCAL_AGENT_RESULT above. Do not use GitHub or any remote source for local-project facts. Do not claim to have performed additional local actions.`;
+    lastHandledText = userText;
+    agentSubmitting = true;
+    setText(prompt);
+    submit();
+    setTimeout(() => { agentSubmitting = false; }, 3000);
+    return true;
+  } catch (error) {
+    console.error('Local controller failed:', error);
+    return false;
+  } finally {
+    controllerBusy = false;
+  }
 }
-new MutationObserver(scan).observe(document.documentElement, { subtree: true, childList: true, characterData: true });
-setInterval(scan, 1000);
-chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
-  if (m?.type === 'bootstrap-agent-mode') {
+
+function interceptKeydown(event) {
+  if (!enabled || agentSubmitting || controllerBusy) return;
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+  const text = composerText().trim();
+  if (!classify(text)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  void controllerFirst(text);
+}
+
+function interceptClick(event) {
+  if (!enabled || agentSubmitting || controllerBusy) return;
+  const button = event.target?.closest?.('button');
+  if (!button) return;
+  const label = `${button.getAttribute('aria-label') || ''} ${button.textContent || ''}`.toLowerCase();
+  if (!label.includes('send') && !label.includes('submit')) return;
+  const text = composerText().trim();
+  if (!classify(text)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  void controllerFirst(text);
+}
+
+document.addEventListener('keydown', interceptKeydown, true);
+document.addEventListener('click', interceptClick, true);
+
+// Fallback for ChatGPT UI paths that bypass normal key/click events.
+let lastObservedUser = '';
+function fallbackObserveUser() {
+  if (!enabled || agentSubmitting || controllerBusy) return;
+  const nodes = [...document.querySelectorAll('[data-message-author-role="user"]')];
+  if (!nodes.length) return;
+  const text = (nodes[nodes.length - 1].textContent || '').trim();
+  if (!text || text === lastObservedUser || text === lastHandledText) return;
+  lastObservedUser = text;
+  // Give the normal ChatGPT submit event a moment. If it produced a local task,
+  // controller-first mode supplies authoritative local context in a follow-up.
+  if (classify(text)) setTimeout(() => void controllerFirst(text), 150);
+}
+setInterval(fallbackObserveUser, 500);
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'bootstrap-agent-mode') {
     enabled = true;
     setText(BOOTSTRAP);
     submit();
