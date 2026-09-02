@@ -10,8 +10,8 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("local-coding-ai-agent")
 
 PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", os.getcwd())).expanduser().resolve()
+ALLOW_WRITES = os.environ.get("ALLOW_WRITES", "false").lower() in {"1", "true", "yes"}
 
-# Conservative initial allowlist. Expand deliberately as needed.
 ALLOWED_COMMANDS = {
     "python3",
     "python",
@@ -45,12 +45,17 @@ def parse_command(command: str) -> list[str]:
         raise ValueError("command must not be empty")
     if parts[0] not in ALLOWED_COMMANDS:
         raise PermissionError("command executable is not in ALLOWED_COMMANDS")
-    # Do not invoke a shell: pipes, redirects, command substitution and `;` are
-    # therefore treated as ordinary/invalid arguments rather than shell syntax.
     dangerous_tokens = {"|", "||", ";", "&&", "&", ">", ">>", "<", "`"}
     if any(token in dangerous_tokens for token in parts):
         raise PermissionError("shell metacharacters are not allowed")
     return parts
+
+
+def require_writes_enabled() -> None:
+    if not ALLOW_WRITES:
+        raise PermissionError(
+            "write operations are disabled. Set ALLOW_WRITES=true for this MCP server process."
+        )
 
 
 @mcp.tool()
@@ -96,6 +101,7 @@ def search_files(query: str) -> list[str]:
 @mcp.tool()
 def write_file(path: str, content: str) -> str:
     """Write a UTF-8 text file under PROJECT_ROOT."""
+    require_writes_enabled()
     file_path = resolve_path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8")
@@ -105,6 +111,7 @@ def write_file(path: str, content: str) -> str:
 @mcp.tool()
 def apply_patch(path: str, old_text: str, new_text: str) -> str:
     """Replace exactly one occurrence of old_text in a project file."""
+    require_writes_enabled()
     file_path = resolve_path(path)
     if not file_path.is_file():
         raise FileNotFoundError(path)
