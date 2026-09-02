@@ -11,6 +11,7 @@ const PORT = Number(process.env.RELAY_PORT || 8787);
 const PROJECT_ROOT = path.resolve(process.env.PROJECT_ROOT || process.cwd());
 const PYTHON_BIN = process.env.MCP_PYTHON || path.join(PROJECT_ROOT, 'mcp-server', '.venv', 'bin', 'python');
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const ALLOWED_GOOGLE_EMAIL = (process.env.ALLOWED_GOOGLE_EMAIL || '').trim().toLowerCase();
 const EXTENSION_ORIGIN = (process.env.EXTENSION_ORIGIN || '').trim();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -62,7 +63,7 @@ async function getMcpClient() {
   if (connecting) return connecting;
   connecting = (async () => {
     mcpTransport = new StdioClientTransport({ command: PYTHON_BIN, args: [path.join(PROJECT_ROOT, 'mcp-server', 'server.py')], cwd: PROJECT_ROOT, env: { ...process.env, PROJECT_ROOT } });
-    const client = new Client({ name: 'local-coding-ai-agent-relay', version: '0.2.0' });
+    const client = new Client({ name: 'local-coding-ai-agent-relay', version: '0.2.1' });
     await client.connect(mcpTransport); mcpClient = client; return client;
   })();
   try { return await connecting; } finally { connecting = undefined; }
@@ -103,7 +104,9 @@ async function oauthCallback(req, res, url) {
   if (!code) return sendJson(res, 400, { ok: false, error: 'missing OAuth code' });
   try {
     const redirectUri = `http://${HOST}:${PORT}/oauth/callback`;
-    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, code, code_verifier: pending.verifier, grant_type: 'authorization_code', redirect_uri: redirectUri }) });
+    const body = new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, code, code_verifier: pending.verifier, grant_type: 'authorization_code', redirect_uri: redirectUri });
+    if (GOOGLE_CLIENT_SECRET) body.set('client_secret', GOOGLE_CLIENT_SECRET);
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
     if (!tokenResponse.ok) throw new Error(`Google token exchange failed (${tokenResponse.status})`);
     const token = await tokenResponse.json();
     const userResponse = await fetch('https://openidconnect.googleapis.com/v1/userinfo', { headers: { Authorization: `Bearer ${token.access_token}` } });
@@ -153,6 +156,7 @@ async function main() {
     console.error('Authentication: Google OAuth + short-lived read-only session');
     console.error(`Allowed account: ${ALLOWED_GOOGLE_EMAIL || '[NOT CONFIGURED]'}`);
     console.error(`Google client ID: ${GOOGLE_CLIENT_ID ? '[CONFIGURED]' : '[NOT CONFIGURED]'}`);
+    console.error(`Google client secret: ${GOOGLE_CLIENT_SECRET ? '[CONFIGURED]' : '[NOT CONFIGURED]'}`);
     console.error(`Extension origin lock: ${EXTENSION_ORIGIN || '[not set]'}`); console.error(`Audit log: ${AUDIT_FILE}`);
   });
   const cleanup = setInterval(() => { const now = Date.now(); for (const [token, session] of sessions) if (now >= session.expiresAt) sessions.delete(token); for (const [state, auth] of pendingAuth) if (now - (auth.createdAt || auth.completedAt || now) > AUTH_TTL_MS) pendingAuth.delete(state); }, 60_000);
