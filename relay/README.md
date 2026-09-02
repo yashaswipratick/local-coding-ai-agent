@@ -2,17 +2,39 @@
 
 The relay is the local HTTP adapter between the ChatGPT browser extension and the Python MCP server. It is **localhost-only** and uses **Google OAuth to prove your identity**, then creates a short-lived in-memory session. No permanent relay token is written to disk.
 
-## Security model
+## Local configuration
 
-The relay binds only to `127.0.0.1`.
+The relay reads its runtime configuration from this file:
 
-Google OAuth authenticates the user. The relay reads the OAuth credentials and allowed account **only from this exact local file on the user's Mac**:
+```text
+relay/local-config.json
+```
+
+This file is intentionally gitignored. Copy the template:
+
+```bash
+cp relay/local-config.example.json relay/local-config.json
+```
+
+Then set the project you want the agent to operate on:
+
+```json
+{
+  "PROJECT_ROOT": "/Users/yashaswipratick/Documents/youtube-analytics",
+  "RELAY_PORT": 8787,
+  "EXTENSION_ORIGIN": ""
+}
+```
+
+Change only `PROJECT_ROOT` when you want the agent to work on a different local project. No environment variable is required for `PROJECT_ROOT`.
+
+The relay also uses this exact local Google OAuth credentials file:
 
 ```text
 /Users/yashaswipratick/Documents/youtube-analytics/screts.json
 ```
 
-The file must contain these exact JSON keys:
+It must contain:
 
 ```json
 {
@@ -22,9 +44,13 @@ The file must contain these exact JSON keys:
 }
 ```
 
-The file is never read from GitHub and is never sent to the browser extension.
+Neither the local configuration nor OAuth secrets are committed to Git.
 
-After successful Google authentication, the relay accepts only the exact account from `ALLOWED_GOOGLE_EMAIL` and creates a 30-minute read-only session.
+## Security model
+
+The relay binds only to `127.0.0.1`.
+
+Google OAuth authenticates the user. The relay accepts only the exact account from `ALLOWED_GOOGLE_EMAIL` and creates a 30-minute read-only session.
 
 Read-only tools enabled initially:
 
@@ -34,7 +60,7 @@ Read-only tools enabled initially:
 - `git_status`
 - `git_diff`
 
-These are deliberately disabled until a later security review:
+These remain disabled until a later security review:
 
 - `write_file`
 - `apply_patch`
@@ -54,11 +80,15 @@ No Google credentials need to be exported as environment variables. The relay lo
 
 Optional origin lock:
 
-```bash
-export EXTENSION_ORIGIN='chrome-extension://YOUR_EXTENSION_ID'
+```json
+{
+  "PROJECT_ROOT": "/absolute/path/to/your/project",
+  "RELAY_PORT": 8787,
+  "EXTENSION_ORIGIN": "chrome-extension://YOUR_EXTENSION_ID"
+}
 ```
 
-After loading the unpacked extension in Chrome, copy its extension ID into `EXTENSION_ORIGIN` and restart the relay. This adds an origin check on browser requests.
+After loading the unpacked extension in Chrome, put its extension ID into `EXTENSION_ORIGIN` and restart the relay. This adds an origin check on browser requests.
 
 ## Install
 
@@ -67,17 +97,16 @@ cd relay
 npm install
 ```
 
-## Run against a project
+## Run
 
-From the repository root:
+The relay reads `PROJECT_ROOT` from `relay/local-config.json`:
 
 ```bash
-PROJECT_ROOT=/absolute/path/to/your/project \
-MCP_PYTHON=/absolute/path/to/this/repo/mcp-server/.venv/bin/python \
-node relay/server.js
+cd relay
+node server.js
 ```
 
-The relay will print the local OAuth credential file path, but it will **never print the client secret or a reusable relay token**.
+The relay will print the configured project root and OAuth credential file path, but it will **never print the client secret or a reusable relay token**.
 
 ## Extension flow
 
@@ -89,14 +118,3 @@ The relay will print the local OAuth credential file path, but it will **never p
 6. Click **Start Agent Mode in current ChatGPT tab**.
 
 Sessions expire after 30 minutes and are also revoked immediately by **Sign out** or by restarting the relay.
-
-## Endpoints
-
-- `GET /health` — local health check.
-- `GET /auth/start` — starts Google OAuth with PKCE.
-- `GET /oauth/callback` — receives the Google authorization code.
-- `GET /auth/status?state=...` — extension polls for the completed login.
-- `POST /logout` — revokes the current session.
-- `POST /action` — executes one allowed structured MCP action for the authenticated session.
-
-The relay never exposes a generic shell HTTP endpoint.
