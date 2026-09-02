@@ -6,7 +6,25 @@ The relay is the local HTTP adapter between the ChatGPT browser extension and th
 
 The relay binds only to `127.0.0.1`.
 
-Google OAuth authenticates the user. The relay then accepts only the exact account configured by `ALLOWED_GOOGLE_EMAIL` and creates a 30-minute read-only session.
+Google OAuth authenticates the user. The relay reads the OAuth credentials and allowed account **only from this exact local file on the user's Mac**:
+
+```text
+/Users/yashaswipratick/Documents/youtube-analytics/screts.json
+```
+
+The file must contain these exact JSON keys:
+
+```json
+{
+  "client-id": "...",
+  "client-secret": "...",
+  "ALLOWED_GOOGLE_EMAIL": "..."
+}
+```
+
+The file is never read from GitHub and is never sent to the browser extension.
+
+After successful Google authentication, the relay accepts only the exact account from `ALLOWED_GOOGLE_EMAIL` and creates a 30-minute read-only session.
 
 Read-only tools enabled initially:
 
@@ -26,22 +44,15 @@ The relay also writes an audit trail to `~/.local-coding-ai-agent/audit.jsonl` w
 
 ## Google OAuth setup
 
-Create a Google OAuth 2.0 client for a desktop/installed application in Google Cloud. Add this exact redirect URI to the client if the console asks for one:
+The Google OAuth client must have this exact redirect URI authorized:
 
 ```text
 http://127.0.0.1:8787/oauth/callback
 ```
 
-Set these environment variables when starting the relay:
+No Google credentials need to be exported as environment variables. The relay loads them from the local `screts.json` file above.
 
-```bash
-export GOOGLE_CLIENT_ID='YOUR_GOOGLE_CLIENT_ID'
-export ALLOWED_GOOGLE_EMAIL='your-google-account@gmail.com'
-```
-
-`ALLOWED_GOOGLE_EMAIL` is the **only Google account that the relay will accept**.
-
-Optional:
+Optional origin lock:
 
 ```bash
 export EXTENSION_ORIGIN='chrome-extension://YOUR_EXTENSION_ID'
@@ -63,12 +74,10 @@ From the repository root:
 ```bash
 PROJECT_ROOT=/absolute/path/to/your/project \
 MCP_PYTHON=/absolute/path/to/this/repo/mcp-server/.venv/bin/python \
-GOOGLE_CLIENT_ID="$GOOGLE_CLIENT_ID" \
-ALLOWED_GOOGLE_EMAIL="$ALLOWED_GOOGLE_EMAIL" \
 node relay/server.js
 ```
 
-The relay will print which authentication mode is active. It will **not** print a reusable relay token.
+The relay will print the local OAuth credential file path, but it will **never print the client secret or a reusable relay token**.
 
 ## Extension flow
 
