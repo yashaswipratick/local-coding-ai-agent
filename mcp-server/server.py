@@ -39,12 +39,18 @@ def resolve_path(relative_path: str) -> Path:
     return candidate
 
 
-def command_allowed(command: str) -> bool:
+def parse_command(command: str) -> list[str]:
     parts = shlex.split(command)
     if not parts:
-        return False
-    executable = parts[0]
-    return executable in ALLOWED_COMMANDS
+        raise ValueError("command must not be empty")
+    if parts[0] not in ALLOWED_COMMANDS:
+        raise PermissionError("command executable is not in ALLOWED_COMMANDS")
+    # Do not invoke a shell: pipes, redirects, command substitution and `;` are
+    # therefore treated as ordinary/invalid arguments rather than shell syntax.
+    dangerous_tokens = {"|", "||", ";", "&&", "&", ">", ">>", "<", "`"}
+    if any(token in dangerous_tokens for token in parts):
+        raise PermissionError("shell metacharacters are not allowed")
+    return parts
 
 
 @mcp.tool()
@@ -112,16 +118,16 @@ def apply_patch(path: str, old_text: str, new_text: str) -> str:
 
 @mcp.tool()
 def run_command(command: str, timeout_seconds: int = 120) -> dict:
-    """Run an allowlisted command with PROJECT_ROOT as the working directory."""
-    if not command_allowed(command):
-        raise PermissionError("command executable is not in ALLOWED_COMMANDS")
+    """Run an allowlisted executable with PROJECT_ROOT as the working directory."""
+    args = parse_command(command)
     completed = subprocess.run(
-        command,
+        args,
         cwd=PROJECT_ROOT,
-        shell=True,
+        shell=False,
         text=True,
         capture_output=True,
         timeout=max(1, min(timeout_seconds, 600)),
+        check=False,
     )
     return {
         "returncode": completed.returncode,
