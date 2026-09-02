@@ -1,0 +1,5 @@
+{
+  "PROJECT_ROOT": "/absolute/path/to/your/project",
+  "RELAY_PORT": 8787,
+  "EXTENSION_ORIGIN": ""
+}
