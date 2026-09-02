@@ -10,8 +10,10 @@ const HOST = '127.0.0.1';
 const PORT = Number(process.env.RELAY_PORT || 8787);
 const PROJECT_ROOT = path.resolve(process.env.PROJECT_ROOT || process.cwd());
 const PYTHON_BIN = process.env.MCP_PYTHON || path.join(PROJECT_ROOT, 'mcp-server', '.venv', 'bin', 'python');
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+
+// OAuth credentials are intentionally read only from this local directory on the user's Mac.
+// The directory is outside this repository and is never exposed to the browser extension.
+const GOOGLE_CREDENTIALS_DIR = '/Users/yashaswipratick/Documents/youtube-analytics';
 const ALLOWED_GOOGLE_EMAIL = (process.env.ALLOWED_GOOGLE_EMAIL || '').trim().toLowerCase();
 const EXTENSION_ORIGIN = (process.env.EXTENSION_ORIGIN || '').trim();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -25,6 +27,43 @@ const pendingAuth = new Map();
 let mcpClient;
 let mcpTransport;
 let connecting;
+let googleCredentials;
+
+function loadGoogleCredentials() {
+  if (googleCredentials) return googleCredentials;
+  if (!fs.existsSync(GOOGLE_CREDENTIALS_DIR)) {
+    throw new Error(`Google credentials directory not found: ${GOOGLE_CREDENTIALS_DIR}`);
+  }
+
+  const candidates = fs.readdirSync(GOOGLE_CREDENTIALS_DIR)
+    .filter((name) => /\.json$/i.test(name))
+    .map((name) => path.join(GOOGLE_CREDENTIALS_DIR, name))
+    .filter((file) => fs.statSync(file).isFile());
+
+  const matches = [];
+  for (const file of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const block = parsed.web || parsed.installed || parsed;
+      if (block?.client_id && block?.client_secret) {
+        matches.push({ file, clientId: String(block.client_id), clientSecret: String(block.client_secret) });
+      }
+    } catch {
+      // Ignore unrelated or malformed JSON files.
+    }
+  }
+
+  if (matches.length === 0) {
+    throw new Error(`No Google OAuth client credentials JSON found in ${GOOGLE_CREDENTIALS_DIR}`);
+  }
+  if (matches.length > 1) {
+    const names = matches.map((item) => path.basename(item.file)).join(', ');
+    throw new Error(`Multiple Google OAuth credential files found: ${names}. Keep one OAuth client JSON in ${GOOGLE_CREDENTIALS_DIR}.`);
+  }
+
+  googleCredentials = matches[0];
+  return googleCredentials;
+}
 
 function b64url(buffer) { return buffer.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); }
 function randomToken(bytes = 32) { return b64url(crypto.randomBytes(bytes)); }
@@ -90,10 +129,12 @@ async function handleAction(req, res) {
   } catch (err) { audit({ user: session.email, tool: payload.tool, status: 'error' }); return sendJson(res, 500, { type: 'result', request_id: payload.request_id ?? null, ok: false, error: String(err?.message || err) }); }
 }
 function authStart(res) {
-  if (!GOOGLE_CLIENT_ID || !ALLOWED_GOOGLE_EMAIL) return sendJson(res, 500, { ok: false, error: 'GOOGLE_CLIENT_ID and ALLOWED_GOOGLE_EMAIL must be configured' });
+  let credentials;
+  try { credentials = loadGoogleCredentials(); } catch (err) { return sendJson(res, 500, { ok: false, error: String(err.message || err) }); }
+  if (!ALLOWED_GOOGLE_EMAIL) return sendJson(res, 500, { ok: false, error: 'ALLOWED_GOOGLE_EMAIL must be configured' });
   const state = randomToken(24); const verifier = randomToken(48); const redirectUri = `http://${HOST}:${PORT}/oauth/callback`;
   pendingAuth.set(state, { verifier, createdAt: Date.now() });
-  const params = new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email profile', access_type: 'online', prompt: 'select_account', state, code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256' });
+  const params = new URLSearchParams({ client_id: credentials.clientId, redirect_uri: redirectUri, response_type: 'code', scope: 'openid email profile', access_type: 'online', prompt: 'select_account', state, code_challenge: pkceChallenge(verifier), code_challenge_method: 'S256' });
   return sendJson(res, 200, { ok: true, state, auth_url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`, expires_in_seconds: AUTH_TTL_MS / 1000 });
 }
 async function oauthCallback(req, res, url) {
@@ -103,9 +144,10 @@ async function oauthCallback(req, res, url) {
   if (error) { pendingAuth.delete(state); pendingAuth.set(state, { completedAt: Date.now(), error: `Google OAuth failed: ${error}` }); return redirect(res, `http://${HOST}:${PORT}/oauth/result?state=${encodeURIComponent(state)}`); }
   if (!code) return sendJson(res, 400, { ok: false, error: 'missing OAuth code' });
   try {
+    const credentials = loadGoogleCredentials();
     const redirectUri = `http://${HOST}:${PORT}/oauth/callback`;
-    const body = new URLSearchParams({ client_id: GOOGLE_CLIENT_ID, code, code_verifier: pending.verifier, grant_type: 'authorization_code', redirect_uri: redirectUri });
-    if (GOOGLE_CLIENT_SECRET) body.set('client_secret', GOOGLE_CLIENT_SECRET);
+    const body = new URLSearchParams({ client_id: credentials.clientId, code, code_verifier: pending.verifier, grant_type: 'authorization_code', redirect_uri: redirectUri });
+    if (credentials.clientSecret) body.set('client_secret', credentials.clientSecret);
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
     if (!tokenResponse.ok) throw new Error(`Google token exchange failed (${tokenResponse.status})`);
     const token = await tokenResponse.json();
@@ -153,14 +195,14 @@ async function main() {
   server.listen(PORT, HOST, () => {
     console.error(`Local Coding AI relay listening on http://${HOST}:${PORT}`);
     console.error(`PROJECT_ROOT=${PROJECT_ROOT}`); console.error(`MCP_PYTHON=${PYTHON_BIN}`);
+    console.error(`Google OAuth credentials directory: ${GOOGLE_CREDENTIALS_DIR}`);
     console.error('Authentication: Google OAuth + short-lived read-only session');
     console.error(`Allowed account: ${ALLOWED_GOOGLE_EMAIL || '[NOT CONFIGURED]'}`);
-    console.error(`Google client ID: ${GOOGLE_CLIENT_ID ? '[CONFIGURED]' : '[NOT CONFIGURED]'}`);
-    console.error(`Google client secret: ${GOOGLE_CLIENT_SECRET ? '[CONFIGURED]' : '[NOT CONFIGURED]'}`);
+    console.error(`Google client credentials: [LOADED ON DEMAND]`);
     console.error(`Extension origin lock: ${EXTENSION_ORIGIN || '[not set]'}`); console.error(`Audit log: ${AUDIT_FILE}`);
   });
   const cleanup = setInterval(() => { const now = Date.now(); for (const [token, session] of sessions) if (now >= session.expiresAt) sessions.delete(token); for (const [state, auth] of pendingAuth) if (now - (auth.createdAt || auth.completedAt || now) > AUTH_TTL_MS) pendingAuth.delete(state); }, 60_000);
-  const shutdown = async () => { clearInterval(cleanup); sessions.clear(); pendingAuth.clear(); try { await mcpClient?.close(); } catch {} try { await mcpTransport?.close(); } catch {} server.close(() => process.exit(0)); };
+  const shutdown = async () => { clearInterval(cleanup); sessions.clear(); pendingAuth.clear(); googleCredentials = undefined; try { await mcpClient?.close(); } catch {} try { await mcpTransport?.close(); } catch {} server.close(() => process.exit(0)); };
   process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 }
 main().catch((err) => { console.error(err); process.exit(1); });
