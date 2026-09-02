@@ -1,17 +1,15 @@
 const ACTION_START = '[[LOCAL_CODING_AGENT_ACTION]]';
 const ACTION_END = '[[/LOCAL_CODING_AGENT_ACTION]]';
-const TOOL_CONTRACT = `Available local tools and arguments:
+const TOOL_CONTRACT = `Available local read-only tools and arguments:
 - list_files({path?: string})
 - read_file({path: string})
 - search_files({query: string})
-- write_file({path: string, content: string})
-- apply_patch({path: string, old_text: string, new_text: string})
-- run_command({command: string, timeout_seconds?: number})
 - git_status({})
-- git_diff({})`;
+- git_diff({})
+Write/patch/command execution tools are intentionally disabled in secure mode.`;
 const BOOTSTRAP = `You are now operating in LOCAL CODING AGENT MODE.
 You are the reasoning brain. A local executor on the user's Mac performs tool actions.
-For any local-project action, output exactly one JSON envelope wrapped between these markers:
+For any local-project read action, output exactly one JSON envelope wrapped between these markers:
 ${ACTION_START}
 {"type":"action","request_id":"unique-id","tool":"tool_name","arguments":{}}
 ${ACTION_END}
@@ -21,7 +19,7 @@ ${ACTION_START}
 {"type":"done","summary":"..."}
 ${ACTION_END}
 ${TOOL_CONTRACT}
-Never invent a tool. Never request absolute paths. Prefer the smallest safe change. Treat tool results as authoritative local state.`;
+Never invent a tool. Never request absolute paths. Prefer the smallest safe read. Treat tool results as authoritative local state.`;
 
 let enabled = false;
 const seen = new WeakSet();
@@ -52,8 +50,7 @@ function submitComposer() {
     return (label.includes('send') || label.includes('submit')) && !b.disabled;
   });
   if (button) { button.click(); return true; }
-  const el = getComposer();
-  el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+  getComposer()?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
   return true;
 }
 
