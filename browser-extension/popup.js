@@ -38,19 +38,7 @@ $('signin').addEventListener('click', async () => {
   try {
     const started = await chrome.runtime.sendMessage({ type: 'start-auth' });
     if (!started?.ok) throw new Error(started?.error || 'Could not start sign-in');
-    $('status').textContent = 'Complete Google sign-in in the opened tab. Waiting for authentication...';
-
-    for (let i = 0; i < 60; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      const result = await chrome.runtime.sendMessage({ type: 'poll-auth', state: started.state });
-      if (result?.status === 'authenticated') {
-        renderAccount(result.email);
-        $('status').textContent = 'Signed in successfully. Session expires after 30 minutes.';
-        return;
-      }
-      if (result?.status === 'error') throw new Error(result.error || 'Google sign-in failed');
-    }
-    throw new Error('Sign-in timed out. Start sign-in again.');
+    $('status').textContent = 'Google sign-in opened. Complete it in the new tab, then reopen this popup to continue.';
   } catch (error) {
     $('status').textContent = `Sign-in failed: ${error.message || error}`;
   }
@@ -64,7 +52,7 @@ $('logout').addEventListener('click', async () => {
 });
 
 $('test').addEventListener('click', async () => {
-  $('status').textContent = 'Testing authenticated session...';
+  $('status').textContent = 'Checking authenticated session...';
   try {
     const result = await refreshSessionState(true);
     if (!result?.authenticated) return;
