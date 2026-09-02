@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Local Coding AI Agent",
+  "version": "0.1.0",
+  "description": "Bridge ChatGPT Web to a local MCP coding executor.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "http://127.0.0.1:8787/*"
+  ],
+  "action": {
+    "default_title": "Local Coding AI Agent",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
