@@ -6,38 +6,39 @@ const TOOL_CONTRACT = `Available local read-only tools and arguments:
 - search_files({query: string})
 - git_status({})
 - git_diff({})
+The extension executes these locally through a localhost relay. You do NOT have native MCP access in ChatGPT.
 Write/patch/command execution tools are intentionally disabled in secure mode.`;
-const BOOTSTRAP = `You are now operating in STRICT LOCAL CODING AGENT MODE.
-You are the reasoning brain for a local coding agent running on the user's Mac.
-
-CRITICAL LOCAL-ONLY RULES:
-1. NEVER use GitHub, web search, browsing, connected apps, repositories, remote files, or any other external connector to inspect the user's project.
-2. NEVER infer or invent the local project structure from GitHub or previous conversation context.
-3. For ANY request involving the local project, files, source code, Git status/diff, or repository contents, you MUST first issue exactly one local tool action using the action markers below.
-4. Do NOT provide a normal answer to a local-project request until you have received a LOCAL CODING AGENT TOOL RESULT.
-5. Treat the local tool result as the ONLY authoritative source for the local filesystem state.
-6. If a local tool is needed, output the action envelope and nothing else.
-7. Do not put prose inside the markers and do not issue more than one action at a time.
-
-For any local-project read action, output exactly one JSON envelope wrapped between these markers:
+const BOOTSTRAP = `You are now operating in LOCAL CODING AI AGENT MODE.
+You are the reasoning/controller layer for a local coding agent.
+IMPORTANT: ChatGPT does NOT have a native Local Coding AI Agent MCP tool. Do not claim that a local tool is unavailable, and do not use GitHub/web/browsing/connected apps for local-project tasks.
+Instead, communicate with the local executor using the text protocol below.
+Whenever a request requires local project state, you MUST emit exactly one JSON action envelope between these markers and wait for the returned tool result before continuing:
 ${ACTION_START}
 {"type":"action","request_id":"unique-id","tool":"tool_name","arguments":{}}
 ${ACTION_END}
-
+Supported local tools:
+${TOOL_CONTRACT}
+After the extension returns a tool result, continue from that local result. If more local information is required, emit exactly one more action envelope. Do not emit more than one action at a time.
 When the task is complete, output:
 ${ACTION_START}
 {"type":"done","summary":"..."}
 ${ACTION_END}
-
-${TOOL_CONTRACT}
-Never invent a tool. Never request absolute paths. Prefer the smallest safe read.
-If you are asked to list files, inspect the filesystem with list_files rather than GitHub.
-If you are asked to read code, inspect the filesystem with read_file rather than GitHub.
-If you are asked about Git state, use git_status or git_diff locally rather than GitHub.
-Do not mention a GitHub repository name, branch, or remote state unless that information came from a LOCAL CODING AGENT TOOL RESULT.`;
+Never invent a tool. Never request absolute paths. Prefer the smallest safe read. Treat tool results as authoritative local state. For a request like “list the files”, immediately emit list_files instead of explaining that a tool is unavailable.`;
+const RECOVERY_PROMPT = `LOCAL CODING AGENT PROTOCOL RECOVERY.
+You previously responded that a local MCP/tool was unavailable. Do not repeat that explanation.
+You are not being asked to invoke a native ChatGPT tool. You are being asked to emit the LOCAL CODING AGENT text protocol so the browser extension can execute the action locally.
+For the pending local-project request, emit exactly one action envelope now.
+Use only these tools:
+- list_files({path?: string})
+- read_file({path: string})
+- search_files({query: string})
+- git_status({})
+- git_diff({})
+Do not use GitHub, web, browsing, connected apps, or remote repository data.`;
 
 let enabled = false;
 const seen = new WeakSet();
+const recoverySent = new WeakSet();
 
 function getComposer() {
   return document.querySelector('textarea') || document.querySelector('[contenteditable="true"]');
@@ -92,16 +93,48 @@ function extractEnvelope(text) {
   } catch { return null; }
 }
 
+function looksLikeToolUnavailable(text) {
+  const normalized = text.toLowerCase();
+  return (normalized.includes('local mcp') || normalized.includes('local coding ai agent')) && (
+    normalized.includes('not available') ||
+    normalized.includes('unavailable') ||
+    normalized.includes('not exposed') ||
+    normalized.includes('currently exposed') ||
+    normalized.includes('tools currently exposed')
+  );
+}
+
 function assistantArticles() {
   const direct = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
   if (direct.length) return direct;
-  return [...document.querySelectorAll('article')].filter((article) => (article.textContent || '').includes(ACTION_START));
+  return [...document.querySelectorAll('article')].filter((article) => {
+    const text = article.textContent || '';
+    return text.includes(ACTION_START) || looksLikeToolUnavailable(text);
+  });
+}
+
+function sendRecovery(article) {
+  if (recoverySent.has(article)) return;
+  recoverySent.add(article);
+  seen.add(article);
+  setTimeout(() => {
+    try {
+      setComposerText(RECOVERY_PROMPT);
+      submitComposer();
+    } catch (error) {
+      console.error('Local Coding AI Agent recovery failed:', error);
+    }
+  }, 250);
 }
 
 async function processAssistantArticle(article) {
   if (seen.has(article)) return;
-  const envelope = extractEnvelope(article.textContent || '');
-  if (!envelope) return;
+  const text = article.textContent || '';
+  const envelope = extractEnvelope(text);
+  if (!envelope) {
+    if (looksLikeToolUnavailable(text)) sendRecovery(article);
+    return;
+  }
   seen.add(article);
   if (envelope.type === 'done') return;
 
