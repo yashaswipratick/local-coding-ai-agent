@@ -4,6 +4,21 @@ async function getConfig() {
   return chrome.storage.local.get({ relayUrl: DEFAULT_RELAY_URL, sessionToken: '', email: '' });
 }
 
+async function checkSession() {
+  const { relayUrl, sessionToken } = await getConfig();
+  if (!sessionToken) return { ok: false, authenticated: false, reason: 'missing_session' };
+  const response = await fetch(`${relayUrl || DEFAULT_RELAY_URL}/session`, {
+    headers: { Authorization: `Bearer ${sessionToken}` },
+  });
+  const data = await response.json();
+  if (response.status === 401) {
+    await chrome.storage.local.set({ sessionToken: '', email: '' });
+    return { ok: false, authenticated: false, reason: 'expired_session' };
+  }
+  if (!response.ok) return { ok: false, authenticated: false, reason: data.error || `relay HTTP ${response.status}` };
+  return data;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'get-config') {
     getConfig().then(sendResponse);
@@ -24,9 +39,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'check-session') {
+    checkSession()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, authenticated: false, reason: String(error.message || error) }));
+    return true;
+  }
+
   if (message?.type === 'execute-action') {
     getConfig().then(async ({ relayUrl, sessionToken }) => {
-      if (!sessionToken) throw new Error('Not signed in. Open the extension and sign in with Google.');
+      if (!sessionToken) throw new Error('No local agent session. Sign in with Google in the extension first.');
       const response = await fetch(`${relayUrl || DEFAULT_RELAY_URL}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sessionToken}` },
@@ -80,7 +102,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'start-agent-mode') {
-    chrome.tabs.query({ active: true, currentWindow: true }).then(async ([tab]) => {
+    checkSession().then(async (session) => {
+      if (!session?.authenticated) {
+        const message = session?.reason === 'expired_session'
+          ? 'Your local Google session expired. Please sign in again.'
+          : 'No authenticated local session. Please sign in with Google in the extension first.';
+        sendResponse({ ok: false, error: message });
+        return;
+      }
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
       if (!tab?.id) throw new Error('No active tab');
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'bootstrap-agent-mode' });
       sendResponse(response);
