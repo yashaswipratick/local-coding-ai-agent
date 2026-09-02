@@ -1,45 +1,59 @@
 # Local Coding AI Agent
 
-A local coding-agent architecture where ChatGPT is the reasoning layer and a local MCP executor performs filesystem, shell, and Git actions on a developer machine.
+A local coding-agent bridge where **ChatGPT Go is the reasoning brain** and a local MCP executor performs filesystem, shell, and Git actions on the developer machine.
 
-## Architecture
+## Final architecture
 
 ```text
-ChatGPT Go (brain)
-        |
-        | browser bridge / relay
-        v
-Local Orchestrator
-        |
-       MCP
-        |
-  +-----+-----+-----+
-  |           |     |
-Files       Shell  Git
-  |           |     |
-  +-----+-----+-----+
-        |
-        v
-   Local project
+ChatGPT Go
+   |
+   | ChatGPT Web UI
+   v
+Chrome extension
+   |
+   | localhost HTTP
+   v
+Local relay (Node.js)
+   |
+   | MCP over stdio
+   v
+Python MCP server
+   |
+   +-------------------+
+   |        |          |
+ Files    Shell       Git
+   |        |          |
+   +--------+----------+
+            |
+            v
+       Local project
 ```
 
-## Design principles
+The browser extension is a **UI adapter**, not a native ChatGPT MCP connector. It places ChatGPT into a structured agent mode, watches assistant messages for explicit action markers, sends one action at a time to the local relay, and posts the result back into the same ChatGPT conversation.
 
-- No Codex dependency for the local execution layer.
-- No OpenAI API dependency for the core executor.
-- The local executor is deterministic: it executes structured actions instead of independently reasoning about the task.
-- Filesystem access is constrained to a configured project root.
-- Shell commands are allowlisted.
-- Destructive operations are intended to require explicit approval.
-- The browser bridge is treated as an adapter; the MCP server remains independent of it.
+## Principles
 
-## Planned components
+- No Codex dependency.
+- No OpenAI API dependency in the local execution path.
+- No local LLM required for the core architecture.
+- The MCP executor performs structured actions; it does not independently reason about code.
+- Filesystem access is confined to `PROJECT_ROOT`.
+- Shell execution uses an executable allowlist and `shell=False`.
+- `write_file` and `apply_patch` are disabled by default and require `ALLOW_WRITES=true`.
+- The relay requires a local bearer token.
 
-- `mcp-server/` — local MCP tool server.
-- `orchestrator/` — action loop between the ChatGPT bridge and MCP tools.
-- `browser-bridge/` — integration notes/configuration for the ChatGPT browser bridge.
-- `docs/` — architecture, protocol, and security documentation.
+## Components
 
-## Status
+- `browser-extension/` — Chrome Manifest V3 extension for ChatGPT Web.
+- `relay/` — Node.js localhost relay and MCP client.
+- `mcp-server/` — Python MCP tool server.
+- `orchestrator/` — earlier experimental API-based loop; retained for reference and not used by the browser relay path.
+- `docs/` — protocol and architecture documentation.
 
-Initial repository bootstrap. The next commits will add the local MCP server, structured action protocol, orchestrator, and setup instructions for macOS.
+## Current status
+
+Core browser-relay implementation is now committed. The remaining work is Mac-side installation and end-to-end validation against a real ChatGPT Go browser session.
+
+## Security note
+
+The browser adapter is unofficial UI automation. ChatGPT DOM structure can change, so the extension keeps the local relay independent and uses explicit action markers rather than interpreting arbitrary natural-language assistant output as commands.
